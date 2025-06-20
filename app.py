@@ -10,66 +10,72 @@ CORS(app)
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Detect "red" spans with tolerance
+# Detect if a color is red enough (tolerant)
 def is_red_color(color_value):
     r = (color_value >> 16) & 255
     g = (color_value >> 8) & 255
     b = color_value & 255
     return (r > 150 and g < 100 and b < 100)
 
-# Regex for detecting option labels like "α.", "β.", etc.
 OPTION_LABEL_RE = re.compile(r'^[α-ωΑ-Ω]\.')
 
-# Parse PDF to extract questions and options
 def extract_questions_from_pdf(path):
     doc = fitz.open(path)
     questions = []
-    current_q = None
+    current_question = None
+    current_option = None
 
     for page in doc:
         for block in page.get_text('dict')['blocks']:
             if 'lines' not in block:
                 continue
             for line in block['lines']:
-                # Build text and detect red
-                line_text = ''
-                saw_red = False
-                for span in line['spans']:
-                    txt = span['text'].strip()
-                    if not txt:
-                        continue
-                    line_text += ' ' + txt
-                    if is_red_color(span['color']):
-                        saw_red = True
-                line_text = line_text.strip()
+                spans = line['spans']
+                if not spans:
+                    continue
+
+                line_text = ' '.join(span['text'].strip() for span in spans).strip()
                 if not line_text:
                     continue
 
-                # Question start
+                # Question start: "1.", "2.", etc.
                 if re.match(r'^\d+\.', line_text):
-                    if current_q:
-                        questions.append(current_q)
-                    current_q = {'question': line_text, 'options': []}
+                    if current_question:
+                        # Finish previous option and question
+                        if current_option:
+                            current_question['options'].append(current_option)
+                            current_option = None
+                        questions.append(current_question)
+                    current_question = {'question': line_text, 'options': []}
+                    current_option = None
 
-                # Option start
+                # Option start: "α.", "β.", etc.
                 elif OPTION_LABEL_RE.match(line_text):
-                    if current_q:
-                        current_q['options'].append({'text': line_text, 'is_correct': saw_red})
+                    if current_option:
+                        current_question['options'].append(current_option)
+                    # Start a new option
+                    current_option = {'text': line_text, 'spans': spans}
 
-                # Continuation lines
                 else:
-                    if not current_q:
-                        continue
-                    # If no options yet, it's a question continuation
-                    if not current_q['options']:
-                        current_q['question'] += ' ' + line_text
-                    else:
-                        # continuation of last option
-                        current_q['options'][-1]['text'] += ' ' + line_text
+                    # Continuation of option or question
+                    if current_option:
+                        # Append continuation text and spans
+                        current_option['text'] += ' ' + line_text
+                        current_option['spans'].extend(spans)
+                    elif current_question:
+                        current_question['question'] += ' ' + line_text
 
-    # Append final question
-    if current_q:
-        questions.append(current_q)
+    # Append last option and question
+    if current_option:
+        current_question['options'].append(current_option)
+    if current_question:
+        questions.append(current_question)
+
+    # Mark correct options based on red color in any span
+    for q in questions:
+        for opt in q['options']:
+            opt['is_correct'] = any(is_red_color(span['color']) for span in opt['spans'])
+            opt.pop('spans', None)  # Remove spans to clean output
 
     return questions
 
